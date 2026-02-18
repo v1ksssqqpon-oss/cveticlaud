@@ -1,2 +1,4 @@
-aiogram==3.1.1
-aiohttp==3.8.6
+aiogram>=3.15.0
+telethon
+pandas
+openpyxl
