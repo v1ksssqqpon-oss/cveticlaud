@@ -33,7 +33,7 @@ from aiogram.enums import ParseMode
 # ═══════════════════════════════════════════
 
 BOT_TOKEN  = "8260722962:AAFxlXEhn0A9Y22LulZX19RY1Napt9IJZ8s"
-WEBAPP_URL = "https://ВАШ_САЙТ.netlify.app"
+WEBAPP_URL = "https://v1ksssqqpon-oss.github.io/cveticlaud/"
 ADMIN_IDS  = [1655167987]   # Ваш Telegram ID
 
 # ═══════════════════════════════════════════
