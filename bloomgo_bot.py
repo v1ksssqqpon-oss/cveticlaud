@@ -1,22 +1,9 @@
-"""
-╔══════════════════════════════════════════════╗
-║          🌸 BloomGo — Telegram Bot           ║
-║                                              ║
-║  Установка:  pip install aiogram aiohttp     ║
-║  Запуск:     python bloomgo_bot.py           ║
-╚══════════════════════════════════════════════╝
-
-ПЕРЕД ЗАПУСКОМ замените 3 строки:
-  BOT_TOKEN  — токен от @BotFather
-  WEBAPP_URL — ссылка с Netlify
-  ADMIN_IDS  — ваш Telegram ID (узнать у @userinfobot)
-"""
-
 import asyncio
 import json
 import logging
+import os
+import time
 
-from aiogram.client.default import DefaultBotProperties
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
@@ -28,291 +15,215 @@ from aiogram.types import (
     WebAppInfo,
 )
 from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 
 # ═══════════════════════════════════════════
-#  ⚙️  НАСТРОЙКИ — ЗАМЕНИТЕ НА СВОИ
+#  ⚙️  НАСТРОЙКИ — ПРОВЕРЬ ДАННЫЕ
 # ═══════════════════════════════════════════
-
 BOT_TOKEN  = "8260722962:AAFxlXEhn0A9Y22LulZX19RY1Napt9IJZ8s"
 WEBAPP_URL = "https://v1ksssqqpon-oss.github.io/cveticlaud/"
-ADMIN_IDS  = [1655167987]   # Ваш Telegram ID
-
+ADMIN_IDS  = [1655167987]  # Твой ID
+DB_PATH    = "products.json" 
 # ═══════════════════════════════════════════
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
+logging.basicConfig(level=logging.INFO)
+
+# Инициализация бота (Фикс для aiogram 3.7+)
 bot = Bot(
     token=BOT_TOKEN, 
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
-dp  = Dispatcher()
+dp = Dispatcher(storage=MemoryStorage())
 
+# Состояния для добавления товара
+class AddProduct(StatesGroup):
+    waiting_for_photo = State()
+    waiting_for_name = State()
+    waiting_for_price = State()
 
 # ───────────────────────────────────────────
-#  /start
+#  РАБОТА С БАЗОЙ ТОВАРОВ (JSON)
 # ───────────────────────────────────────────
+def load_products():
+    if not os.path.exists(DB_PATH):
+        with open(DB_PATH, "w", encoding="utf-8") as f:
+            json.dump([], f)
+        return []
+    try:
+        with open(DB_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return []
+
+def save_product(product_data):
+    products = load_products()
+    products.append(product_data)
+    with open(DB_PATH, "w", encoding="utf-8") as f:
+        json.dump(products, f, ensure_ascii=False, indent=4)
+
+def delete_product_by_id(p_id):
+    products = load_products()
+    new_products = [p for p in products if str(p['id']) != str(p_id)]
+    with open(DB_PATH, "w", encoding="utf-8") as f:
+        json.dump(new_products, f, ensure_ascii=False, indent=4)
+
+# ───────────────────────────────────────────
+#  АДМИН-ПАНЕЛЬ (СТРОГО ДЛЯ ADMIN_IDS)
+# ───────────────────────────────────────────
+
+@dp.message(Command("admin"), F.from_user.id.in_(ADMIN_IDS))
+async def admin_menu(message: types.Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить букет", callback_query_data="add_item")],
+        [InlineKeyboardButton(text="🗑 Удалить букет", callback_query_data="list_del")]
+    ])
+    await message.answer("🛠 <b>Панель управления BloomGo</b>\nВыберите действие:", reply_markup=kb)
+
+# FSM процесс добавления
+@dp.callback_query(F.data == "add_item", F.from_user.id.in_(ADMIN_IDS))
+async def start_add(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("1️⃣ Пришлите <b>ФОТО</b> букета:")
+    await state.set_state(AddProduct.waiting_for_photo)
+    await callback.answer()
+
+@dp.message(AddProduct.waiting_for_photo, F.photo, F.from_user.id.in_(ADMIN_IDS))
+async def add_photo(message: types.Message, state: FSMContext):
+    file_id = message.photo[-1].file_id
+    await state.update_data(photo=file_id)
+    await message.answer("2️⃣ Введите <b>НАЗВАНИЕ</b>:")
+    await state.set_state(AddProduct.waiting_for_name)
+
+@dp.message(AddProduct.waiting_for_name, F.from_user.id.in_(ADMIN_IDS))
+async def add_name(message: types.Message, state: FSMContext):
+    await state.update_data(name=message.text)
+    await message.answer("3️⃣ Введите <b>ЦЕНУ</b> (число):")
+    await state.set_state(AddProduct.waiting_for_price)
+
+@dp.message(AddProduct.waiting_for_price, F.from_user.id.in_(ADMIN_IDS))
+async def add_price(message: types.Message, state: FSMContext):
+    if not message.text.isdigit():
+        return await message.answer("Ошибка! Введите цену только цифрами.")
+    
+    data = await state.get_data()
+    new_item = {
+        "id": int(time.time()),
+        "name": data['name'],
+        "price": int(message.text),
+        "photo": data['photo']
+    }
+    save_product(new_item)
+    await message.answer(f"✅ Товар <b>{data['name']}</b> успешно сохранен!")
+    await state.clear()
+
+# Удаление товара
+@dp.callback_query(F.data == "list_del", F.from_user.id.in_(ADMIN_IDS))
+async def list_del(callback: CallbackQuery):
+    products = load_products()
+    if not products:
+        return await callback.message.answer("База товаров пуста.")
+    
+    for p in products:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🗑 Удалить", callback_query_data=f"del_{p['id']}")]
+        ])
+        await callback.message.answer_photo(p['photo'], caption=f"ID: {p['id']}\n{p['name']} — {p['price']}₽", reply_markup=kb)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("del_"), F.from_user.id.in_(ADMIN_IDS))
+async def confirm_del(callback: CallbackQuery):
+    p_id = callback.data.split("_")[1]
+    delete_product_by_id(p_id)
+    await callback.message.delete()
+    await callback.answer("Удалено!")
+
+# ───────────────────────────────────────────
+#  КЛИЕНТСКАЯ ЛОГИКА (ИЗ ОРИГИНАЛА)
+# ───────────────────────────────────────────
+
 @dp.message(CommandStart())
-async def cmd_start(message: types.Message):
-    name = message.from_user.first_name or "Гость"
-
+async def start_cmd(message: types.Message):
     kb = ReplyKeyboardMarkup(
-        keyboard=[[
-            KeyboardButton(
-                text="🌸 Открыть магазин",
-                web_app=WebAppInfo(url=WEBAPP_URL)
-            )
-        ]],
+        keyboard=[[KeyboardButton(text="🌸 Открыть магазин", web_app=WebAppInfo(url=WEBAPP_URL))]],
         resize_keyboard=True
     )
-
     await message.answer(
-        f"Привет, <b>{name}</b>! 🌸\n\n"
-        "Добро пожаловать в <b>BloomGo</b> — свежие цветы "
-        "с доставкой за 60 минут.\n\n"
-        "👇 Нажмите кнопку, чтобы выбрать букет:",
+        f"<b>Привет, {message.from_user.first_name}!</b> 🌸\n\n"
+        "Добро пожаловать в BloomGo. Здесь вы найдете лучшие цветы в городе.",
         reply_markup=kb
     )
 
-
-# ───────────────────────────────────────────
-#  /help
-# ───────────────────────────────────────────
-@dp.message(Command("help"))
-async def cmd_help(message: types.Message):
-    await message.answer(
-        "🌸 <b>BloomGo — команды</b>\n\n"
-        "/start — открыть магазин\n"
-        "/orders — мои заказы\n"
-        "/help — эта справка\n\n"
-        "По любым вопросам — пишите нам прямо здесь!"
-    )
-
-
-# ───────────────────────────────────────────
-#  /orders — история заказов пользователя
-# ───────────────────────────────────────────
-@dp.message(Command("orders"))
-async def cmd_orders(message: types.Message):
-    # В реальном проекте здесь запрос к базе данных
-    await message.answer(
-        "📦 <b>Ваши заказы</b>\n\n"
-        "🚚 <b>#BG-4821</b> — Роскошь роз × 1\n"
-        "    <i>В пути · прибудет в 14:30</i>\n\n"
-        "✅ <b>#BG-4815</b> — Пионы мечты × 1\n"
-        "    <i>Доставлен 15 февраля</i>"
-    )
-
-
-# ───────────────────────────────────────────
-#  /admin — панель администратора
-# ───────────────────────────────────────────
-@dp.message(Command("admin"))
-async def cmd_admin(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        await message.answer("⛔️ У вас нет доступа к этой команде.")
-        return
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(
-            text="👨‍💼 Открыть админ-панель",
-            web_app=WebAppInfo(url=WEBAPP_URL + "?screen=admin")
-        )
-    ]])
-
-    await message.answer(
-        "👨‍💼 <b>Панель администратора</b>\n\n"
-        "📊 Сегодня: 23 заказа · 48 900 ₽\n"
-        "📦 В обработке: 8\n"
-        "🚚 В доставке: 6\n"
-        "✅ Завершено: 9",
-        reply_markup=kb
-    )
-
-
-# ───────────────────────────────────────────
-#  Данные из Mini App (оформление заказа)
-# ───────────────────────────────────────────
 @dp.message(F.web_app_data)
-async def handle_webapp_data(message: types.Message):
-    """
-    Срабатывает когда пользователь нажимает «Оплатить» в Mini App.
-    Mini App должен вызвать:
-      window.Telegram.WebApp.sendData(JSON.stringify(orderData))
-    """
+async def handle_order(message: types.Message):
     try:
         data = json.loads(message.web_app_data.data)
-    except json.JSONDecodeError:
-        await message.answer("❌ Ошибка при получении данных. Попробуйте ещё раз.")
-        return
-
-    event = data.get("type")
-
-    # ── Новый заказ ──────────────────────────
-    if event == "order":
-        order_id  = data.get("order_id", "BG-0000")
-        items     = data.get("items", [])
-        total     = data.get("total", 0)
-        address   = data.get("address", "не указан")
-        time_slot = data.get("time_slot", "как можно скорее")
-        card_text = data.get("card_text", "")
-
-        lines = "\n".join(
-            f"  • {i['name']} × {i['qty']} = {i['price'] * i['qty']:,} ₽"
-            for i in items
-        ) or "  — пусто —"
-
-        # Ответ клиенту
-        await message.answer(
-            f"✅ <b>Заказ #{order_id} принят!</b>\n\n"
-            f"📦 <b>Состав:</b>\n{lines}\n\n"
-            f"💰 <b>Итого:</b> {total:,} ₽\n"
-            f"📍 <b>Адрес:</b> {address}\n"
-            f"🕐 <b>Время доставки:</b> {time_slot}\n"
-            + (f"💌 <b>Открытка:</b> {card_text}\n" if card_text else "") +
-            "\nПришлём фото букета перед отправкой! 📸\n"
-            "Следите за статусом: /orders"
-        )
-
-        # Уведомление администраторам
-        user = message.from_user
+        items = data.get("items", [])
+        total = data.get("totalPrice", 0)
+        user_info = data.get("user", {})
+        order_id = int(message.message_id)
+        
+        items_text = "\n".join([f"• {i['name']} ({i['price']}₽)" for i in items])
         admin_text = (
-            f"🔔 <b>Новый заказ #{order_id}</b>\n\n"
-            f"👤 {user.full_name}"
-            + (f" (@{user.username})" if user.username else "") +
-            f"\n📱 ID: <code>{user.id}</code>\n\n"
-            f"📦 <b>Состав:</b>\n{lines}\n\n"
-            f"💰 <b>Сумма:</b> {total:,} ₽\n"
-            f"📍 <b>Адрес:</b> {address}\n"
-            f"🕐 <b>Время:</b> {time_slot}"
-            + (f"\n💌 <b>Открытка:</b> {card_text}" if card_text else "")
+            f"🔔 <b>НОВЫЙ ЗАКАЗ #{order_id}</b>\n\n"
+            f"👤 Клиент: {user_info.get('name', 'Не указано')}\n"
+            f"📞 Телефон: {user_info.get('phone', 'Не указано')}\n"
+            f"📍 Адрес: {user_info.get('address', 'Не указано')}\n\n"
+            f"🛒 Товары:\n{items_text}\n\n"
+            f"💰 Итого: <b>{total}₽</b>"
         )
 
-        admin_kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(
-                text="✅ Принять",
-                callback_data=f"accept_{order_id}_{user.id}"
-            ),
-            InlineKeyboardButton(
-                text="❌ Отменить",
-                callback_data=f"cancel_{order_id}_{user.id}"
-            ),
-        ], [
-            InlineKeyboardButton(
-                text="🚚 Передать в доставку",
-                callback_data=f"deliver_{order_id}_{user.id}"
-            ),
-        ]])
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Подтвердить", callback_query_data=f"conf_{order_id}_{message.from_user.id}")],
+            [InlineKeyboardButton(text="❌ Отклонить", callback_query_data=f"canc_{order_id}_{message.from_user.id}")]
+        ])
 
         for admin_id in ADMIN_IDS:
-            try:
-                await bot.send_message(admin_id, admin_text, reply_markup=admin_kb)
-            except Exception as e:
-                logging.warning(f"Не удалось отправить уведомление админу {admin_id}: {e}")
+            await bot.send_message(admin_id, admin_text, reply_markup=kb)
 
-    # ── AI-запрос ────────────────────────────
-    elif event == "ai_request":
-        mood   = data.get("mood", "")
-        budget = data.get("budget", "любой")
-        await message.answer(
-            f"🤖 <b>AI-подбор букета</b>\n\n"
-            f"Настроение: {mood}\n"
-            f"Бюджет: {budget}\n\n"
-            f"Рекомендую: <b>Роскошь роз</b> 🌹\n"
-            f"<i>Идеально подходит для вашего случая!</i>"
-        )
+        await message.answer("🌸 <b>Ваш заказ отправлен!</b>\nМенеджер свяжется с вами в ближайшее время.")
+    except Exception as e:
+        logging.error(f"Error: {e}")
 
-    else:
-        logging.info(f"Неизвестный тип события: {event}")
+# Обработка статусов заказов (Confirm / Cancel / Deliver)
+@dp.callback_query(F.data.startswith("conf_"))
+async def cb_confirm(callback: CallbackQuery):
+    parts = callback.data.split("_")
+    order_id, u_id = parts[1], parts[2]
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚚 Передать курьеру", callback_query_data=f"deliver_{order_id}_{u_id}")]
+    ])
+    
+    await callback.message.edit_reply_markup(reply_markup=kb)
+    await callback.message.answer(f"✅ Заказ #{order_id} подтвержден!")
+    await bot.send_message(u_id, f"✅ Ваш заказ #{order_id} подтвержден! Мы уже начали его собирать. 🌸")
 
-
-# ───────────────────────────────────────────
-#  Кнопки управления заказом (для админа)
-# ───────────────────────────────────────────
-@dp.callback_query(F.data.startswith("accept_"))
-async def cb_accept(callback: CallbackQuery):
-    parts    = callback.data.split("_")
-    order_id = parts[1]
-    user_id  = int(parts[2]) if len(parts) > 2 else None
-
-    await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer(f"✅ Заказ #{order_id} принят в работу!")
-    await callback.answer("Принято!")
-
-    if user_id:
-        try:
-            await bot.send_message(
-                user_id,
-                f"🌸 <b>Заказ #{order_id} принят!</b>\n"
-                f"Флорист уже собирает ваш букет ✂️"
-            )
-        except Exception:
-            pass
-
-
-@dp.callback_query(F.data.startswith("cancel_"))
+@dp.callback_query(F.data.startswith("canc_"))
 async def cb_cancel(callback: CallbackQuery):
-    parts    = callback.data.split("_")
-    order_id = parts[1]
-    user_id  = int(parts[2]) if len(parts) > 2 else None
-
+    parts = callback.data.split("_")
+    order_id, u_id = parts[1], parts[2]
     await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer(f"❌ Заказ #{order_id} отменён.")
-    await callback.answer("Отменено")
-
-    if user_id:
-        try:
-            await bot.send_message(
-                user_id,
-                f"😔 К сожалению, заказ #{order_id} был отменён.\n"
-                f"Напишите нам, если это ошибка."
-            )
-        except Exception:
-            pass
-
+    await callback.message.answer(f"❌ Заказ #{order_id} отменен.")
+    await bot.send_message(u_id, f"😔 К сожалению, ваш заказ #{order_id} был отменен.")
 
 @dp.callback_query(F.data.startswith("deliver_"))
 async def cb_deliver(callback: CallbackQuery):
-    parts    = callback.data.split("_")
-    order_id = parts[1]
-    user_id  = int(parts[2]) if len(parts) > 2 else None
-
+    parts = callback.data.split("_")
+    order_id, u_id = parts[1], parts[2]
     await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer(f"🚚 Заказ #{order_id} передан курьеру!")
-    await callback.answer("Передано в доставку!")
+    await callback.message.answer(f"🚚 Заказ #{order_id} в доставке!")
+    await bot.send_message(u_id, f"🚚 <b>Ваш заказ #{order_id} в пути!</b>\nОжидайте курьера в ближайшее время. 🌸")
 
-    if user_id:
-        try:
-            await bot.send_message(
-                user_id,
-                f"🚚 <b>Заказ #{order_id} в пути!</b>\n"
-                f"Курьер уже едет к вам. Ожидайте! 🌸"
-            )
-        except Exception:
-            pass
-
-
-# ───────────────────────────────────────────
-#  Все остальные сообщения
-# ───────────────────────────────────────────
 @dp.message()
 async def fallback(message: types.Message):
-    await message.answer(
-        "Нажмите кнопку <b>«🌸 Открыть магазин»</b> "
-        "или отправьте /start"
-    )
+    await message.answer("Пожалуйста, используйте меню или команду /start")
 
-
-# ───────────────────────────────────────────
-#  Запуск
 # ───────────────────────────────────────────
 async def main():
-    print("=" * 45)
-    print("  🌸  BloomGo Bot запущен!")
-    print("=" * 45)
+    print("🚀 BloomGo Bot запущен!")
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
